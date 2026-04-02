@@ -1,2 +1,4 @@
 *.pth
 *.pdf
+*.pyc
+**/__pycache__/
