@@ -10,7 +10,7 @@ class LayerNorm(nn.Module):
     self.scale=nn.Parameter(torch.ones(emb_dim))
   def forward(self,inp):
     mean = inp.mean(dim=-1, keepdim=True) 
-    var = inp.var(dim=-1, keepdim=True)
+    var  = inp.var(dim=-1, keepdim=True, unbiased=False)
     input_Norm=(inp-mean)/torch.sqrt(var+self.epsilon)
     return input_Norm*self.scale+self.shift
 
@@ -56,7 +56,7 @@ class MultiHeadAttention(nn.Module):
     atten_scores=querys@keys.transpose(2,3)
     
     mask_bool=self.mask.bool()[:num_token,:num_token]
-    atten_scores.masked_fill(mask_bool,-torch.inf)
+    atten_scores=atten_scores.masked_fill(mask_bool,-torch.inf)
     
     attn_weigth=torch.softmax(atten_scores/keys.shape[-1]**0.5,dim=-1)
     attn_weigth=self.dropout(attn_weigth)
@@ -95,7 +95,7 @@ cfg=GPT_2_config={
   "n_head":12,
   "n_layer":12,
   "dropout":0.1,
-  "qkv_bias":False  
+  "qkv_bias":True  
 }
 
 
@@ -103,28 +103,30 @@ cfg=GPT_2_config={
 class Transfomers(nn.Module):
   def __init__(self,cfg):
     super().__init__()
-    self.layernorm=LayerNorm(cfg["emb_dim"])
+    self.layernorm1=LayerNorm(cfg["emb_dim"])
+    self.layernorm2=LayerNorm(cfg["emb_dim"])
+
     self.mutihead_atten=MultiHeadAttention(
       d_in=cfg["emb_dim"],
       d_out=cfg["emb_dim"],
       context_length=cfg["context_len"],
       num_heads=cfg["n_head"],
       dropout=cfg["dropout"],
-      qkv_bias=False)
+      qkv_bias=cfg["qkv_bias"])
     self.dropout=nn.Dropout(cfg["dropout"])
     self.feed_forward=FeedForward(cfg)
     
   def forward(self,x):
     shortcut=x
     
-    x=self.layernorm.forward(x)
+    x=self.layernorm1.forward(x)
     x=self.mutihead_atten.forward(x)
     x=self.dropout(x)
     x=x+shortcut
     
     shortcut=x
     
-    x=self.layernorm(x)
+    x=self.layernorm2(x)
     x=self.feed_forward(x)
     x=self.dropout(x)
     x=x+shortcut
@@ -167,7 +169,8 @@ class GPT(nn.Module):
       return logit
        
        
-       
+''' 
+ # without temp and top k scaling     
 def generate_text(model,ip_token_id,max_new_tokens,context_size):
   for i in range(max_new_tokens):
     context_ip=ip_token_id[:,-context_size:]
@@ -178,6 +181,40 @@ def generate_text(model,ip_token_id,max_new_tokens,context_size):
     idx_next=torch.argmax(prob,dim=-1,keepdim=True) #taking max val prob
     ip_token_id=torch.concat((ip_token_id,idx_next),dim=1)
   return ip_token_id  
+'''
+# WITH temp and top k scaling
+def generate_text(model, ip_token_id, max_new_tokens,   context_size, temp, topk=None):
+    for i in range(max_new_tokens):
+        context_ip = ip_token_id[:, -context_size:]
+           
+        with torch.no_grad():
+            logit = model(context_ip)
+        
+        logit = logit[:, -1, :]  # (batch, vocab)
+
+        # Temperature scaling
+        if temp > 0:
+            logit = logit / temp
+
+        # Top-k filtering
+        if topk is not None:
+            top_logit, _ = torch.topk(logit, topk)
+            min_topk = top_logit[:, -1].unsqueeze(-1)
+
+            logit = torch.where(
+                logit < min_topk,
+                torch.tensor(float("-inf"), device=logit.device),
+                logit
+            )
+
+        prob = torch.softmax(logit, dim=-1)
+
+        # Sampling (better than argmax)
+        idx_next = torch.multinomial(prob, num_samples=1)
+
+        ip_token_id = torch.cat((ip_token_id, idx_next), dim=1)
+
+    return ip_token_id
 
 
 #Encoding text --> token_id
